@@ -1,7 +1,7 @@
 # - any use of this is for ethical use and not intended for malicious activity.
 # hAckDHD
 # My un-vibecode edition
-# For Kali or other debian products - but we are skids so no clue what that is
+# For Kali, Parrot, or any Debian-based distro
 
 ##########################################
 # //////          Imports          //////#
@@ -52,7 +52,7 @@ ENG_NAME    = None
 # //////            ASCII ART       ####
 ##########################################
 ASCII_ART = r"""
- __ _   __  ____        __         _  _   __    ___  __ _  ____  ____ 
+ __ _   __  ____        __         _  _   __    ___  __ _  ____  ____
 (  ( \ /  \(_  _)      / _\       / )( \ / _\  / __)(  / )(  __)(  _ \
 /    /(  O ) )(  _____/    \ ____ ) __ (/    \( (__  )  (  ) _)  )   /
 \_)__) \__/ (__)(____)\_/\_/(____)\_)(_/\_/\_/ \___)(__\_)(____)(__\_)
@@ -73,6 +73,58 @@ def checkmark(state: bool, engagement_active: bool = True):
     if not engagement_active:
         return " "
     return f"{BLUE}✔{RESET}" if state else f"{RED}✘{RESET}"
+
+
+##########################################
+# //////     TERMINAL LAUNCHER     ######
+##########################################
+def launch_in_terminal(script_path: Path):
+    """
+    Detect whatever terminal emulator is available on this Debian-based
+    system and launch the given shell script in a new window.
+    Falls back to xterm which is available on virtually every distro.
+    """
+    candidates = [
+        "mate-terminal",
+        "xfce4-terminal",
+        "gnome-terminal",
+        "konsole",
+        "lxterminal",
+        "tilix",
+        "terminator",
+        "kitty",
+        "alacritty",
+        "xterm",          # universal fallback — install via: sudo apt install xterm
+    ]
+
+    term = None
+    for c in candidates:
+        found = shutil.which(c)
+        if found:
+            term = found
+            break
+
+    if not term:
+        print(f"{RED}No terminal emulator found.{RESET}")
+        print(f"Install one with:  sudo apt install xterm -y")
+        print(f"Or run manually:   bash {script_path}")
+        input("Press Enter to continue...")
+        return
+
+    name = Path(term).name
+
+    # gnome-terminal uses -- to separate its args from the command
+    if name == "gnome-terminal":
+        cmd = [term, "--", "bash", str(script_path)]
+    # these use --command with a string (not a list)
+    elif name in ("xfce4-terminal",):
+        cmd = [term, "--command", f"bash {script_path}"]
+    # everything else (mate-terminal, xterm, lxterminal, tilix,
+    # terminator, kitty, alacritty, konsole) uses -e
+    else:
+        cmd = [term, "-e", f"bash {script_path}"]
+
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 ##########################################
@@ -248,13 +300,128 @@ def move_engagement():
 
 # ////////////////////////////////////////////////////////#
 #                                                        #
+#                    PRE-REQUISITES                      #
+#                                                        #
+#  Checks and installs all tools used by this script.   #
+#  Works on any Debian-based distro (Kali, Parrot, etc) #
+#                                                        #
+# ////////////////////////////////////////////////////////#
+
+# Each entry: (display_name, apt_package, binary_to_check)
+PREREQ_TOOLS = [
+    # Core scanning
+    ("nmap",            "nmap",                    "nmap"),
+    ("curl",            "curl",                    "curl"),
+    ("snmpwalk",        "snmp",                    "snmpwalk"),
+    # Web enum
+    ("ffuf",            "ffuf",                    "ffuf"),
+    # Terminal emulator (universal fallback)
+    ("xterm",           "xterm",                   "xterm"),
+    # Wordlists (seclists)
+    ("seclists",        "seclists",                None),   # no binary, check dir
+    # Useful extras
+    ("gobuster",        "gobuster",                "gobuster"),
+    ("nikto",           "nikto",                   "nikto"),
+    ("whatweb",         "whatweb",                 "whatweb"),
+    ("dnsrecon",        "dnsrecon",                "dnsrecon"),
+    ("enum4linux",      "enum4linux",              "enum4linux"),
+    ("smbclient",       "smbclient",               "smbclient"),
+    ("impacket scripts","python3-impacket",         None),  # check via python import
+    ("hydra",           "hydra",                   "hydra"),
+    ("john",            "john",                    "john"),
+    ("hashcat",         "hashcat",                 "hashcat"),
+    ("netcat",          "netcat-traditional",      "nc"),
+    ("socat",           "socat",                   "socat"),
+    ("python3-pip",     "python3-pip",             "pip3"),
+    ("git",             "git",                     "git"),
+]
+
+def check_tool(binary, pkg):
+    """Return True if a tool is present."""
+    if binary:
+        return shutil.which(binary) is not None
+    # Special cases with no binary
+    if pkg == "seclists":
+        return Path("/usr/share/wordlists/seclists").exists()
+    if pkg == "python3-impacket":
+        try:
+            import impacket  # noqa: F401
+            return True
+        except ImportError:
+            return False
+    return False
+
+def prereqs():
+    while True:
+        os.system("clear")
+        print(f"{BLUE}[ Pre-Requisites Check ]{RESET}\n")
+        print(f"{'Tool':<22} {'Status'}")
+        print("-" * 40)
+
+        missing = []
+        for display, pkg, binary in PREREQ_TOOLS:
+            installed = check_tool(binary, pkg)
+            status    = f"{BLUE}✔ installed{RESET}" if installed else f"{RED}✘ missing{RESET}"
+            print(f"{display:<22} {status}")
+            if not installed:
+                missing.append((display, pkg))
+
+        print()
+        if not missing:
+            print(f"{BLUE}All tools are installed.{RESET}\n")
+            input("Press Enter to return to main menu...")
+            break
+
+        print(f"{RED}{len(missing)} tool(s) missing.{RESET}\n")
+        print("1) Install all missing tools")
+        print("2) Refresh check")
+        print("3) Back to main menu\n")
+
+        c = input("Select: ").strip()
+
+        if c == "1":
+            os.system("clear")
+            print(f"{BLUE}[ Installing missing tools ]{RESET}\n")
+            print("Updating apt cache...\n")
+            os.system("sudo apt update -y")
+            print()
+
+            pkgs = " ".join(pkg for _, pkg in missing)
+            print(f"{BLUE}Installing:{RESET} {pkgs}\n")
+            ret = os.system(f"sudo apt install -y {pkgs}")
+
+            # pip-based tools that may not be in apt
+            pip_extras = {
+                "python3-impacket": "impacket",
+            }
+            for display, pkg in missing:
+                if pkg in pip_extras:
+                    print(f"\n{BLUE}Installing {display} via pip...{RESET}")
+                    os.system(f"sudo pip3 install {pip_extras[pkg]} --break-system-packages 2>/dev/null || sudo pip3 install {pip_extras[pkg]}")
+
+            print()
+            if ret == 0:
+                print(f"{BLUE}Installation complete.{RESET}")
+            else:
+                print(f"{RED}Some packages may have failed. Check output above.{RESET}")
+            input("\nPress Enter to refresh check...")
+
+        elif c == "2":
+            continue
+
+        elif c == "3":
+            break
+
+
+# ////////////////////////////////////////////////////////#
+#                                                        #
 #                       RECON                            #
 #                                                        #
 #  Both HTB and LIVE write a self-contained dashboard    #
 #  script to disk then launch it in a new terminal via   #
-#  exo-open. The dashboard script contains everything    #
-#  it needs - scan list, curses UI, threading - so it    #
-#  runs fully independently in its own window.           #
+#  launch_in_terminal(). The dashboard script contains   #
+#  everything it needs - scan list, curses UI, threading #
+#  - so it runs fully independently in its own window.   #
 #                                                        #
 #  HTB  - parallel:   all scans fire at once             #
 #  LIVE - sequential: one scan at a time in order        #
@@ -299,7 +466,6 @@ def recon():
             input("Press Enter to launch...")
             time.sleep(0.3)
 
-            # Write the self-contained dashboard script for HTB (parallel mode)
             dashboard_script = scripts_dir / "recon_htb_dashboard.py"
             dashboard_script.write_text(f"""\
 import subprocess, threading, curses, time, os, getpass, sys
@@ -308,9 +474,6 @@ TARGET_IP = {repr(TARGET_IP)}
 
 scans = {repr(scans)}
 
-# ---- Prompt for password ONCE before anything starts ----
-# All sudo commands use -S to read password from stdin so
-# they never fight over the TTY when running in parallel
 print("\\033[36m[ HTB/CTF Recon - {TARGET_IP} ]\\033[0m")
 print("\\nEnter sudo password once - all scans will use it.\\n")
 try:
@@ -319,7 +482,6 @@ except KeyboardInterrupt:
     print("\\nCancelled.")
     sys.exit(1)
 
-# Quick auth check before launching the dashboard
 test = subprocess.run(
     ["sudo", "-S", "-v"],
     input=SUDO_PW + "\\n",
@@ -340,7 +502,6 @@ lock         = threading.Lock()
 all_done     = threading.Event()
 
 def run_scan(name, cmd):
-    # Rewrite sudo -> sudo -S so password is piped via stdin
     injected_cmd = cmd.replace("sudo ", "sudo -S ", 1)
     with lock:
         status[name] = "RUNNING"
@@ -351,7 +512,6 @@ def run_scan(name, cmd):
         stderr=subprocess.STDOUT,
         text=True
     )
-    # Write password to stdin then close it so sudo stops waiting
     try:
         proc.stdin.write(SUDO_PW + "\\n")
         proc.stdin.flush()
@@ -466,11 +626,7 @@ input("Press Enter to close...")
             launcher = Path("/tmp/hackdhd_htb_recon.sh")
             launcher.write_text(f"#!/bin/bash\npython3 {dashboard_script}\n")
             launcher.chmod(0o755)
-            subprocess.Popen(
-                ["exo-open", "--launch", "TerminalEmulator", str(launcher)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+            launch_in_terminal(launcher)
             break
 
         # -------------------------------------------------- LIVE
@@ -484,7 +640,6 @@ input("Press Enter to close...")
             scan_dir.mkdir(parents=True, exist_ok=True)
             scripts_dir.mkdir(parents=True, exist_ok=True)
 
-            # Ordered - runs top to bottom, one at a time
             scans = [
                 ("TCP General", f"sudo nmap -sC -sV -T2 -vv {TARGET_IP} -oA {ENG_PATH}/recon_scans/NMAP_{TARGET_IP}_TCP_General"),
                 ("UDP Fast",    f"sudo nmap -sU -p 53,161,67,68,123,137,138,139,162,445 -sV -T2 -vv {TARGET_IP} -oA {ENG_PATH}/recon_scans/NMAP_{TARGET_IP}_UDP_Fast"),
@@ -506,7 +661,6 @@ input("Press Enter to close...")
             input("Press Enter to launch...")
             time.sleep(0.3)
 
-            # Write the self-contained dashboard script for LIVE (sequential mode)
             dashboard_script = scripts_dir / "recon_live_dashboard.py"
             dashboard_script.write_text(f"""\
 import subprocess, threading, curses, time, os, getpass, sys
@@ -515,7 +669,6 @@ TARGET_IP = {repr(TARGET_IP)}
 
 scans = {repr(scans)}
 
-# ---- Prompt for password ONCE before anything starts ----
 print("\\033[36m[ LIVE Recon - {TARGET_IP} ]\\033[0m")
 print("\\nEnter sudo password once - all scans will use it.\\n")
 try:
@@ -524,7 +677,6 @@ except KeyboardInterrupt:
     print("\\nCancelled.")
     sys.exit(1)
 
-# Quick auth check before launching the dashboard
 test = subprocess.run(
     ["sudo", "-S", "-v"],
     input=SUDO_PW + "\\n",
@@ -546,7 +698,6 @@ all_done     = threading.Event()
 
 def run_all_sequential():
     for name, cmd in scans:
-        # Rewrite sudo -> sudo -S so password is piped via stdin
         injected_cmd = cmd.replace("sudo ", "sudo -S ", 1)
         with lock:
             status[name] = "RUNNING"
@@ -663,11 +814,7 @@ input("Press Enter to close...")
             launcher = Path("/tmp/hackdhd_live_recon.sh")
             launcher.write_text(f"#!/bin/bash\npython3 {dashboard_script}\n")
             launcher.chmod(0o755)
-            subprocess.Popen(
-                ["exo-open", "--launch", "TerminalEmulator", str(launcher)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+            launch_in_terminal(launcher)
             break
 
         elif c == "3":
@@ -838,11 +985,7 @@ input("\\nScan done. Press Enter...")
         launcher = Path(f"/tmp/nmap_launch_{label}.sh")
         launcher.write_text(f"#!/bin/bash\npython3 {tmp_script}\n")
         launcher.chmod(0o755)
-        subprocess.Popen(
-            ["exo-open", "--launch", "TerminalEmulator", str(launcher)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        launch_in_terminal(launcher)
 
     if scan == "1":
         build_and_launch("", "TCP")
@@ -1006,14 +1149,10 @@ print(f"{{BLUE}}Running: {{cmd}}{{RESET}}\\n")
 os.system(cmd)
 input("\\nScan done. Press Enter...")
 """)
-        LAUNCHER = Path("/tmp/ffuf_launch.sh")
-        LAUNCHER.write_text(f"#!/bin/bash\npython3 {tmp_script}\n")
-        LAUNCHER.chmod(0o755)
-        subprocess.Popen(
-            ["exo-open", "--launch", "TerminalEmulator", str(LAUNCHER)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        launcher = Path("/tmp/ffuf_launch.sh")
+        launcher.write_text(f"#!/bin/bash\npython3 {tmp_script}\n")
+        launcher.chmod(0o755)
+        launch_in_terminal(launcher)
     else:
         for fuzz_url in fuzz_urls:
             proto_label = "http"  if "http://"  in fuzz_url else "https"
@@ -1037,11 +1176,7 @@ input("\\nScan done. Press Enter...")
             launcher = Path(f"/tmp/ffuf_launch_{proto_label}_{fuzz_label}.sh")
             launcher.write_text(f"#!/bin/bash\npython3 {tmp_script}\n")
             launcher.chmod(0o755)
-            subprocess.Popen(
-                ["exo-open", "--launch", "TerminalEmulator", str(launcher)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+            launch_in_terminal(launcher)
             time.sleep(0.5)
 
 
@@ -1159,7 +1294,7 @@ def main_menu():
 
         c = input("Select: ").lower()
 
-        if   c == "1": pass
+        if   c == "1": prereqs()
         elif c == "2": pass
         elif c == "3": network_tools()
         elif c == "4": web_enum_tools()
@@ -1185,4 +1320,3 @@ def main_menu():
 
 if __name__ == "__main__":
     main_menu()
-                 
