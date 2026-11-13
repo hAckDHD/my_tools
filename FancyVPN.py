@@ -24,9 +24,6 @@ RESET  = "\033[0m"
 BLUE   = "\033[36m"
 YELLOW = "\033[33m"
 
-HTB_SUBNETS = ["10.10.0.0/16", "10.129.0.0/16"]
-THM_SUBNETS = ["10.10.0.0/16", "10.8.0.0/16"]
-
 ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*m')
 
 def visible_len(text):
@@ -118,83 +115,6 @@ def get_running_openvpn_processes() -> list:
 def get_connected_configs() -> set:
     """Return set of config path strings that have a live openvpn process."""
     return {cfg for cfg, _ in get_running_openvpn_processes()}
-
-
-def get_vpn_interfaces() -> list:
-    """Return active tun/tap/wg/ppp interface names."""
-    try:
-        result = subprocess.run(["ip", "link", "show"], capture_output=True, text=True)
-        ifaces = []
-        for line in result.stdout.splitlines():
-            if not re.search(r'\b(tun|tap|wg|ppp)\d*\b', line):
-                continue
-            if "UP" not in line:
-                continue
-            match = re.search(r'^\d+:\s+(\S+?)[@:]', line)
-            if match:
-                ifaces.append(match.group(1))
-        return ifaces
-    except Exception:
-        return []
-
-
-def detect_other_vpn() -> bool:
-    """True if any openvpn process or tun/wg/tap interface is already active."""
-    if get_running_openvpn_processes():
-        return True
-    return bool(get_vpn_interfaces())
-
-
-def get_folder_type(folder: Path) -> str:
-    """Map folder name → 'htb' | 'thm' | 'other'."""
-    name = folder.name.upper()
-    if "HTB" in name:
-        return "htb"
-    if "THM" in name:
-        return "thm"
-    return "other"
-
-
-def get_new_tun_interface(before_ifaces: list, timeout: int = 15) -> str | None:
-    """Poll until a new tun interface appears; return name or None on timeout."""
-    for _ in range(timeout):
-        time.sleep(1)
-        current = get_vpn_interfaces()
-        new = [i for i in current if i not in before_ifaces]
-        if new:
-            return new[0]
-    return None
-
-
-def setup_split_tunnel(tun_iface: str, folder_type: str):
-    """Add HTB/THM subnet routes and iptables exemptions through tun_iface."""
-    subnets = HTB_SUBNETS if folder_type == "htb" else THM_SUBNETS
-    print(f"{BLUE}Configuring split tunnel on {tun_iface}...{RESET}")
-    for subnet in subnets:
-        result = subprocess.run(
-            ["sudo", "ip", "route", "replace", subnet, "dev", tun_iface],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            print(f"  {GREEN}Route set: {subnet} → {tun_iface}{RESET}")
-        else:
-            print(f"  {RED}Route failed: {subnet} — {result.stderr.strip()}{RESET}")
-
-        # Allow traffic through HTB/THM tun even if a kill-switch (e.g. PIA) blocks it
-        for chain in ["OUTPUT", "FORWARD"]:
-            subprocess.run(
-                ["sudo", "iptables", "-C", chain, "-o", tun_iface, "-d", subnet, "-j", "ACCEPT"],
-                capture_output=True
-            )
-            check = subprocess.run(
-                ["sudo", "iptables", "-C", chain, "-o", tun_iface, "-d", subnet, "-j", "ACCEPT"],
-                capture_output=True
-            )
-            if check.returncode != 0:
-                subprocess.run(
-                    ["sudo", "iptables", "-I", chain, "1", "-o", tun_iface, "-d", subnet, "-j", "ACCEPT"],
-                    capture_output=True
-                )
 
 
 ################################
@@ -380,17 +300,6 @@ def connect_vpn():
         input("Press Enter to continue...")
         return
 
-    folder_type  = get_folder_type(folder)
-    is_htb_thm   = folder_type in ("htb", "thm")
-    other_vpn_up = detect_other_vpn()
-    split_tunnel = is_htb_thm and other_vpn_up
-
-    before_ifaces = get_vpn_interfaces()
-
-    if split_tunnel:
-        print(f"\n{YELLOW}Other VPN detected — split tunnel mode.{RESET}")
-        print(f"{YELLOW}HTB/THM traffic → new tunnel | all other traffic → existing VPN.{RESET}")
-
     # Authenticate sudo up front so the password prompt is explicit
     print(f"\n{BLUE}sudo is required to start OpenVPN.{RESET}")
     try:
@@ -433,17 +342,6 @@ def connect_vpn():
                 pids[str(config)] = pid
                 save_pids(pids)
             print(f"{GREEN}Connected! PID {pid} — running in background.{RESET}")
-
-            if split_tunnel:
-                print(f"{BLUE}Waiting for tunnel interface...{RESET}")
-                tun = get_new_tun_interface(before_ifaces)
-                if tun:
-                    setup_split_tunnel(tun, folder_type)
-                else:
-                    print(f"{YELLOW}Tun interface not detected — add routes manually with:{RESET}")
-                    subnets = HTB_SUBNETS if folder_type == "htb" else THM_SUBNETS
-                    for s in subnets:
-                        print(f"  sudo ip route add {s} dev <tun_iface>")
         else:
             if status == "dead":
                 print(f"{RED}OpenVPN exited. Last log lines:{RESET}")
