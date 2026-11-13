@@ -337,6 +337,34 @@ def pick_file_from_folder(folder: Path):
         print("Invalid choice.")
 
 
+def log_path(config: Path) -> str:
+    return f"/tmp/fancy_vpn_{config.stem}.log"
+
+
+def read_log(config: Path) -> str:
+    """Log is root-owned (openvpn runs as root), so read it via sudo."""
+    r = subprocess.run(["sudo", "cat", log_path(config)], capture_output=True, text=True)
+    return r.stdout
+
+
+def wait_for_connection(config: Path, timeout: int = 20):
+    """
+    Poll the log until OpenVPN reports success, or the process dies / times out.
+    Returns (pid or None, status) where status is 'ok', 'dead', or 'timeout'.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(1)
+        pid = next((p for cfg, p in get_running_openvpn_processes() if cfg == str(config)), None)
+        log = read_log(config)
+        if "Initialization Sequence Completed" in log:
+            return pid, "ok"
+        if pid is None and log:
+            return None, "dead"
+    pid = next((p for cfg, p in get_running_openvpn_processes() if cfg == str(config)), None)
+    return pid, "timeout"
+
+
 def connect_vpn():
     folder = pick_folder()
     if folder is None:
@@ -363,37 +391,47 @@ def connect_vpn():
         print(f"\n{YELLOW}Other VPN detected — split tunnel mode.{RESET}")
         print(f"{YELLOW}HTB/THM traffic → new tunnel | all other traffic → existing VPN.{RESET}")
 
-    print(f"\n{BLUE}Launching OpenVPN for {config.name}...{RESET}")
+    # Authenticate sudo up front so the password prompt is explicit
+    print(f"\n{BLUE}sudo is required to start OpenVPN.{RESET}")
+    try:
+        if subprocess.run(["sudo", "-v"]).returncode != 0:
+            print(f"{RED}sudo authentication failed.{RESET}")
+            input("Press Enter to continue...")
+            return
+    except FileNotFoundError:
+        print(f"{RED}sudo not found.{RESET}")
+        input("Press Enter to continue...")
+        return
 
+    print(f"{BLUE}Launching OpenVPN for {config.name}...{RESET}")
+
+    # NOTE: no --route-nopull. HTB/THM configs don't push a default route, so they
+    # are already split-tunnel; --route-nopull would drop the lab routes they push.
     cmd = [
         "sudo", "openvpn",
         "--config", str(config),
         "--daemon",
-        "--log", f"/tmp/fancy_vpn_{config.stem}.log",
+        "--log", log_path(config),
     ]
-    if split_tunnel:
-        cmd += ["--route-nopull"]
 
     try:
+        # Clear the old log so we don't read a previous run's output
+        subprocess.run(["sudo", "rm", "-f", log_path(config)])
+
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"{RED}Failed to start OpenVPN:{RESET}\n{result.stderr}")
+            print(f"{RED}Failed to start OpenVPN:{RESET}\n{result.stderr}{result.stdout}")
             input("Press Enter to continue...")
             return
 
-        print(f"{BLUE}Waiting for OpenVPN to start...{RESET}")
-        time.sleep(2)
+        print(f"{BLUE}Waiting for tunnel to come up...{RESET}")
+        pid, status = wait_for_connection(config)
 
-        pid = None
-        for cfg, p in get_running_openvpn_processes():
-            if cfg == str(config):
-                pid = p
-                break
-
-        if pid:
-            pids = load_pids()
-            pids[str(config)] = pid
-            save_pids(pids)
+        if status == "ok":
+            if pid:
+                pids = load_pids()
+                pids[str(config)] = pid
+                save_pids(pids)
             print(f"{GREEN}Connected! PID {pid} — running in background.{RESET}")
 
             if split_tunnel:
@@ -407,7 +445,12 @@ def connect_vpn():
                     for s in subnets:
                         print(f"  sudo ip route add {s} dev <tun_iface>")
         else:
-            print(f"{YELLOW}OpenVPN launched — check /tmp/fancy_vpn_{config.stem}.log if status does not update.{RESET}")
+            if status == "dead":
+                print(f"{RED}OpenVPN exited. Last log lines:{RESET}")
+            else:
+                print(f"{YELLOW}Tunnel not up after 20s (PID {pid}). Last log lines:{RESET}")
+            print("\n".join(read_log(config).splitlines()[-20:]))
+            print(f"{YELLOW}Full log: sudo cat {log_path(config)}{RESET}")
 
     except FileNotFoundError:
         print(f"{RED}openvpn not found. Install it with: sudo apt install openvpn{RESET}")
